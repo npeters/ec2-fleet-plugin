@@ -1,6 +1,7 @@
 package com.amazon.jenkins.ec2fleet;
 
 import hudson.model.Computer;
+import hudson.slaves.OfflineCause;
 import hudson.slaves.RetentionStrategy;
 import hudson.slaves.SlaveComputer;
 
@@ -24,9 +25,10 @@ public class IdleRetentionStrategy extends RetentionStrategy<SlaveComputer>
     }
 
     @Override public long check(final SlaveComputer c) {
-        if (isIdleForTooLong(c))
+        if (isIdleForTooLong(c)) {
             parent.terminateInstance(c.getName());
-        else {
+            c.disconnect(new OfflineCause.ChannelTermination(new Exception()));
+        }else {
             if (c.isOffline() && !c.isConnecting() && c.isLaunchSupported())
                 c.tryReconnect();
         }

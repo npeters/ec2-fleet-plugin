@@ -162,7 +162,9 @@ public class EC2FleetCloud extends Cloud
 
         final ModifySpotFleetRequestRequest request=new ModifySpotFleetRequestRequest();
         request.setSpotFleetRequestId(fleet);
-        request.setTargetCapacity(stats.getNumDesired() + excessWorkload);
+
+        int targetCapacity = (stats.getNumDesired() + excessWorkload >= maxAllowed)?maxAllowed:(stats.getNumDesired() + excessWorkload);
+        request.setTargetCapacity(targetCapacity);
 
         final AmazonEC2 ec2=connect(credentialsId, region);
         ec2.modifySpotFleetRequest(request);
@@ -200,7 +202,12 @@ public class EC2FleetCloud extends Cloud
             if (!instancesDying.contains(instId) &&
                     !jenkinsInstances.contains(instId)) {
                 // Use a nuclear option to terminate an unknown instance
-                ec2.terminateInstances(new TerminateInstancesRequest(Collections.singletonList(instId)));
+                try {
+                    ec2.terminateInstances(new TerminateInstancesRequest(Collections.singletonList(instId)));
+                }catch (Exception ex){
+                    ex.printStackTrace();
+                }
+                instancesSeen.remove(instId);
             }
         }
 
@@ -233,7 +240,7 @@ public class EC2FleetCloud extends Cloud
             return; // Wait some more...
 
         final FleetNode slave = new FleetNode(instanceId, "Fleet slave for" + instanceId,
-                fsRoot, "1", Node.Mode.NORMAL, "ec2-fleet", new ArrayList<NodeProperty<?>>(),
+                fsRoot, "1", Node.Mode.EXCLUSIVE, "ec2-fleet", new ArrayList<NodeProperty<?>>(),
                 FLEET_CLOUD_ID, computerConnector.launch(address, TaskListener.NULL));
 
         // Initialize our retention strategy
@@ -261,9 +268,11 @@ public class EC2FleetCloud extends Cloud
         }
     }
 
-    public synchronized void terminateInstance(final String instanceId) {
-        if (!instancesSeen.contains(instanceId) || instancesDying.contains(instanceId))
-            throw new IllegalStateException("Unknown instance terminated: " + instanceId);
+    public synchronized void terminateInstance(final String instanceId)  {
+        if (!instancesSeen.contains(instanceId) || instancesDying.contains(instanceId)) {
+            System.out.println("Unknown instance terminated: " + instanceId);
+            return;
+        }
 
         final FleetStateStats stats=updateStatus();
         //We can't remove the last instance
@@ -280,9 +289,26 @@ public class EC2FleetCloud extends Cloud
 
         ec2.terminateInstances(new TerminateInstancesRequest(Collections.singletonList(instanceId)));
 
+
+
         //And remove the instance
         instancesSeen.remove(instanceId);
         instancesDying.add(instanceId);
+
+        // remove slave
+        final Jenkins jenkins=Jenkins.getActiveInstance();
+        synchronized (jenkins) {
+            final Node n = jenkins.getNode(instanceId);
+            if (n != null) {
+                try {
+                    jenkins.removeNode(n);
+                } catch (final Exception ex) {
+                    throw new RuntimeException(ex);
+                }
+            }
+        }
+
+
     }
 
     @Override public boolean canProvision(final Label label) {
