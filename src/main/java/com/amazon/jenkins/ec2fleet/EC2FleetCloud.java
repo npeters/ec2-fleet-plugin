@@ -60,6 +60,7 @@ import java.util.logging.SimpleFormatter;
 public class EC2FleetCloud extends Cloud {
     public static final String FLEET_CLOUD_ID = "FleetCloud";
     public static final String DEFAULT_LABEL = "ec2-fleet";
+    private static final Logger LOGGER = Logger.getLogger(EC2FleetCloud.class.getName());
 
     private static final SimpleFormatter sf = new SimpleFormatter();
 
@@ -144,6 +145,7 @@ public class EC2FleetCloud extends Cloud {
 
     public static void log(final Logger logger, final Level level,
                            final TaskListener listener, String message, final Throwable exception) {
+
         logger.log(level, message, exception);
         if (listener != null) {
             if (exception != null)
@@ -166,7 +168,6 @@ public class EC2FleetCloud extends Cloud {
     }
 
     public synchronized void unpause() {
-
         pause = false;
     }
 
@@ -174,16 +175,27 @@ public class EC2FleetCloud extends Cloud {
     public synchronized Collection<NodeProvisioner.PlannedNode> provision(
             final Label label, final int excessWorkload) {
 
-        final FleetStateStats stats = updateStatus();
-        final int maxAllowed = this.getMaxSize();
 
-        if (stats.getNumDesired() + excessWorkload > maxAllowed || !"active".equals(stats.getState()))
+        LOGGER.info(String.format("provision(%s;%s)",label.getName(),excessWorkload+""));
+        final FleetStateStats stats = updateStatus();
+        int maxAllowed = this.getMaxSize();
+
+        if (maxAllowed - stats.getNumDesired() <= 0 || !"active".equals(stats.getState())){
             return Collections.emptyList();
+        }
+
+        int expectWorkload;
+        if ( maxAllowed - stats.getNumDesired() < excessWorkload  ){
+            expectWorkload = maxAllowed - stats.getNumDesired();
+        }else{
+            expectWorkload = excessWorkload;
+        }
+
 
         final ModifySpotFleetRequestRequest request = new ModifySpotFleetRequestRequest();
         request.setSpotFleetRequestId(fleet);
 
-        int targetCapacity = stats.getNumDesired() + excessWorkload;
+        int targetCapacity = stats.getNumDesired() + expectWorkload;
         request.setTargetCapacity(targetCapacity);
 
         final AmazonEC2 ec2 = connect(credentialsId, region);
@@ -191,13 +203,15 @@ public class EC2FleetCloud extends Cloud {
 
         final List<NodeProvisioner.PlannedNode> resultList =
                 new ArrayList<NodeProvisioner.PlannedNode>();
-        for (int f = 0; f < excessWorkload; ++f) {
+        for (int f = 0; f < expectWorkload; ++f) {
             final SettableFuture<Node> futureNode = SettableFuture.create();
             final NodeProvisioner.PlannedNode plannedNode =
                     new NodeProvisioner.PlannedNode("FleetNode-" + f, futureNode, 1);
             resultList.add(plannedNode);
             this.plannedNodes.add(plannedNode);
         }
+
+        LOGGER.info(String.format("provision(%s;%s) -> %s",label.getName(),excessWorkload+"",expectWorkload+""));
         return resultList;
     }
 
@@ -287,7 +301,8 @@ public class EC2FleetCloud extends Cloud {
         try {
             ec2.terminateInstances(new TerminateInstancesRequest(Collections.singletonList(instanceId)));
         } catch (Exception e) {
-            e.printStackTrace();
+            LOGGER.log(Level.WARNING,String.format("doTerminateInstances %s",instanceId),e);
+
         }
         //And remove the instance
         instancesSeen.remove(instanceId);
@@ -331,8 +346,7 @@ public class EC2FleetCloud extends Cloud {
 
     @Override
     public boolean canProvision(final Label label) {
-
-        return !pause && fleet != null && DEFAULT_LABEL.equals(label.getName()) && status.getNumDesired() < maxSize;
+        return fleet != null && DEFAULT_LABEL.equals(label.getName()) ;
     }
 
     private static AmazonEC2 connect(final String credentialsId, final String region) {
