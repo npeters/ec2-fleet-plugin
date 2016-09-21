@@ -14,18 +14,14 @@ import com.amazonaws.services.ec2.model.ModifySpotFleetRequestRequest;
 import com.amazonaws.services.ec2.model.Region;
 import com.amazonaws.services.ec2.model.SpotFleetRequestConfig;
 import com.amazonaws.services.ec2.model.TerminateInstancesRequest;
-import com.cloudbees.jenkins.plugins.awscredentials.AWSCredentialsHelper;
-import com.cloudbees.jenkins.plugins.awscredentials.AmazonWebServicesCredentials;
+import com.cloudbees.jenkins.plugins.awscredentials.*;
 import com.google.common.util.concurrent.SettableFuture;
 import hudson.Extension;
 import hudson.model.Descriptor;
 import hudson.model.Label;
 import hudson.model.Node;
 import hudson.model.TaskListener;
-import hudson.slaves.Cloud;
-import hudson.slaves.ComputerConnector;
-import hudson.slaves.NodeProperty;
-import hudson.slaves.NodeProvisioner;
+import hudson.slaves.*;
 import hudson.util.FormValidation;
 import hudson.util.ListBoxModel;
 import jenkins.model.Jenkins;
@@ -157,14 +153,30 @@ public class EC2FleetCloud extends Cloud {
     }
 
     public synchronized void pause() {
-        final Jenkins jenkins = Jenkins.getActiveInstance();
+
 
         final ModifySpotFleetRequestRequest request = new ModifySpotFleetRequestRequest();
         request.setSpotFleetRequestId(fleet);
         request.setTargetCapacity(1);
         final AmazonEC2 ec2 = connect(credentialsId, region);
         ec2.modifySpotFleetRequest(request);
-        pause = true;
+
+        final FleetStateStats curStatus = FleetStateStats.readClusterState(ec2, getFleet());
+        Set<String> instances =  new HashSet<String>(curStatus.getInstances());
+        if (!instances.isEmpty()) {
+            String firstInstanceId = instances.iterator().next();
+            instances.remove(firstInstanceId);// keep one instance
+            if (!instances.isEmpty()) {
+                for (final String instanceId : instances) {
+                    doTerminateInstances(ec2, instanceId);
+                }
+            }
+            //disable the node
+            FleetNode firstNode = ((FleetNode)Jenkins.getActiveInstance().getNode(firstInstanceId));
+            if (firstNode != null) {
+                firstNode.getComputer().disconnect( new OfflineCause.UserCause(null,"ec2fleet pause"));
+            }
+        }
     }
 
     public synchronized void unpause() {
@@ -180,7 +192,7 @@ public class EC2FleetCloud extends Cloud {
         final FleetStateStats stats = updateStatus();
         int maxAllowed = this.getMaxSize();
 
-        if (maxAllowed - stats.getNumDesired() <= 0 || !"active".equals(stats.getState())){
+        if (pause || (maxAllowed - stats.getNumDesired() <= 0) || !"active".equals(stats.getState())){
             return Collections.emptyList();
         }
 
@@ -277,10 +289,11 @@ public class EC2FleetCloud extends Cloud {
             slave.setRetentionStrategy(new IdleRetentionStrategy(getIdleMinutes(), this));
 
         final Jenkins jenkins = Jenkins.getActiveInstance();
+
         //noinspection SynchronizationOnLocalVariableOrMethodParameter
         synchronized (jenkins) {
             // Try to avoid duplicate nodes
-            final Node n = jenkins.getNode(name);
+            final Node n = jenkins.getNode(slave.getDisplayName());
             if (n != null)
                 jenkins.removeNode(n);
             jenkins.addNode(slave);
@@ -322,16 +335,16 @@ public class EC2FleetCloud extends Cloud {
 
     }
 
-    public synchronized void terminateInstance(final String instanceId) {
+    public synchronized boolean terminateInstance(final String instanceId) {
         if (!instancesSeen.contains(instanceId) || instancesDying.contains(instanceId)) {
             System.out.println("Unknown instance terminated: " + instanceId);
-            return;
+            return false;
         }
 
         final FleetStateStats stats = updateStatus();
         //We can't remove the last instance
         if (stats.getNumDesired() == 1 || !"active".equals(stats.getState()))
-            return;
+            return false;
 
         final AmazonEC2 ec2 = connect(credentialsId, region);
 
@@ -341,7 +354,7 @@ public class EC2FleetCloud extends Cloud {
         request.setExcessCapacityTerminationPolicy("NoTermination");
         ec2.modifySpotFleetRequest(request);
         doTerminateInstances(ec2, instanceId);
-
+        return true;
     }
 
     @Override

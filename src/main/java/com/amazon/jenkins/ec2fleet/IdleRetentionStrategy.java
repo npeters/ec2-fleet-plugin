@@ -26,7 +26,6 @@ public class IdleRetentionStrategy extends RetentionStrategy<SlaveComputer>
 
     @Override public long check(final SlaveComputer c) {
         if (isIdleForTooLong(c)) {
-            c.disconnect(new OfflineCause.ChannelTermination(new Exception()));
             parent.terminateInstance(c.getName());
         }else {
             if (c.isOffline() && !c.isConnecting() && c.isLaunchSupported())
